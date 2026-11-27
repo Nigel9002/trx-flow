@@ -40,14 +40,23 @@ These steps use Firebase Authentication, Firestore, and Hosting only. Do not dep
 
 ## Publish on GitHub Pages
 
-The repository includes a GitHub Actions workflow at `.github/workflows/deploy.yml`. To publish:
+The published build is served from the `docs` folder on the `main` branch, so it does not depend on paid build runners.
 
-1. Push this project to a GitHub repository. GitHub Pages on the Free plan generally requires a public repository, so the source code will be visible. `.env` is ignored by Git; do not force-add it or commit passwords, service-account keys, or other credentials.
-2. In the repository, open **Settings → Secrets and variables → Actions** and add these repository secrets using the matching values from your local `.env`: `VITE_FIREBASE_API_KEY`, `VITE_FIREBASE_AUTH_DOMAIN`, `VITE_FIREBASE_PROJECT_ID`, `VITE_FIREBASE_MESSAGING_SENDER_ID`, `VITE_FIREBASE_APP_ID`, and `VITE_FIREBASE_MEASUREMENT_ID`.
-3. Open **Settings → Pages**, choose **GitHub Actions** as the build and deployment source, then push to `main` or manually run the **Deploy TRX FLOW to GitHub Pages** workflow from the Actions tab.
-4. Add `<your-github-username>.github.io` to **Firebase Console → Authentication → Settings → Authorized domains**.
+1. The source repository is public at `https://github.com/Nigel9002/trx-flow`. GitHub Pages on the Free plan requires a public repository; `.env` is ignored by Git and must never be force-added.
+2. In **Settings → Pages**, choose **Deploy from a branch**, select `main` and `/docs`, then save.
+3. To rebuild after changing the app, make sure your local `.env` has the Firebase web-app values, then run:
 
-The deployment uses the repository name for the Pages base path and adapts the app's static assets and service worker to that path. The Firebase web configuration is included in client-side JavaScript when the site is built; it is not a password. Secure access with Firestore rules and Firebase Authentication, and never put admin passwords or service-account credentials in Actions secrets.
+   ```powershell
+   $env:GITHUB_ACTIONS = 'true'
+   $env:GITHUB_REPOSITORY = 'Nigel9002/trx-flow'
+   npm run build
+   Copy-Item dist\* docs\ -Recurse -Force
+   ```
+
+   Commit and push the updated `docs` folder to `main`; GitHub Pages will publish it. The Firebase web configuration is included in client-side JavaScript and is not a password. Never commit admin passwords or service-account credentials.
+4. Add `nigel9002.github.io` to **Firebase Console → Authentication → Settings → Authorized domains** so sign-in works from the published domain.
+
+The repository-name base path is handled by Vite, including the static assets and service worker. Secure access to data with Firebase Authentication and Firestore rules.
 
 ## Available features
 
