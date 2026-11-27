@@ -1,0 +1,201 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function profileExists() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function profileRole() {
+      return profileExists()
+        ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role
+        : '';
+    }
+
+    function isActiveUser() {
+      return profileExists()
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.status == 'active';
+    }
+
+    function isAdmin() {
+      return isActiveUser() && profileRole() == 'admin';
+    }
+
+    function isEmployeeOwner(userId) {
+      return isActiveUser() && request.auth.uid == userId;
+    }
+
+    function canAccessAccount(accountId) {
+      return exists(/databases/$(database)/documents/accounts/$(accountId))
+        && get(/databases/$(database)/documents/accounts/$(accountId)).data.assignedEmployees is list
+        && request.auth.uid in get(/databases/$(database)/documents/accounts/$(accountId)).data.assignedEmployees;
+    }
+
+    function hasAppendedPaymentHistory(newRecord, oldRecord) {
+      return oldRecord.get('history', []) is list
+        && newRecord.history is list
+        && newRecord.history.size() == oldRecord.get('history', []).size() + 1
+        && newRecord.history[oldRecord.get('history', []).size()].status == newRecord.status
+        && newRecord.history[oldRecord.get('history', []).size()].actorUid == request.auth.uid;
+    }
+
+    match /users/{userId} {
+      allow read: if isAdmin() || isEmployeeOwner(userId);
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /accounts/{accountId} {
+      allow read: if isAdmin()
+        || (isActiveUser()
+          && resource.data.assignedEmployees != null
+          && request.auth.uid in resource.data.assignedEmployees);
+      allow create: if isAdmin() && request.resource.data.createdBy == request.auth.uid;
+      allow update: if isAdmin() && request.resource.data.updatedBy == request.auth.uid;
+      allow delete: if false;
+
+    }
+
+    match /paymentRecords/{recordId} {
+      allow read: if isAdmin()
+        || (isActiveUser() && resource.data.createdBy == request.auth.uid);
+
+      allow create: if isActiveUser()
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.amount is number
+        && request.resource.data.amount > 0
+        && request.resource.data.currency in ['USD', 'EUR', 'GBP']
+        && request.resource.data.accountId is string
+        && (isAdmin() || canAccessAccount(request.resource.data.accountId))
+        && request.resource.data.status in ['Draft', 'Pending Review'];
+
+      allow update: if isAdmin()
+          && resource.data.status != 'Approved'
+          && request.resource.data.status in ['Draft', 'Pending Review', 'Approved', 'Rejected', 'Cancelled', 'Correction Requested']
+          && (request.resource.data.status != 'Approved' || resource.data.createdBy != request.auth.uid)
+          && request.resource.data.reviewedBy == request.auth.uid
+          && hasAppendedPaymentHistory(request.resource.data, resource.data)
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['status', 'reviewNote', 'approvedBy', 'approvedByName', 'reviewedBy', 'reviewedByName', 'approvedAt', 'updatedAt', 'history'])
+        || (isActiveUser()
+          && resource.data.createdBy == request.auth.uid
+          && resource.data.status in ['Draft', 'Pending Review', 'Correction Requested']
+          && request.resource.data.status in ['Draft', 'Pending Review']
+          && request.resource.data.createdBy == request.auth.uid
+          && request.resource.data.updatedBy == request.auth.uid
+          && request.resource.data.amount is number
+          && request.resource.data.amount > 0
+          && request.resource.data.currency in ['USD', 'EUR', 'GBP']
+          && request.resource.data.accountId is string
+          && hasAppendedPaymentHistory(request.resource.data, resource.data)
+          && canAccessAccount(request.resource.data.accountId)
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['accountId', 'accountName', 'amount', 'currency', 'category', 'referenceNumber', 'date', 'notes', 'status', 'updatedAt', 'updatedBy', 'history']));
+
+      allow delete: if isAdmin();
+    }
+
+    match /tasks/{taskId} {
+      allow read: if isAdmin()
+        || (isActiveUser() && resource.data.assignedTo == request.auth.uid);
+
+      allow create: if isAdmin() && request.resource.data.createdBy == request.auth.uid;
+      allow delete: if false;
+      allow update: if (isAdmin() && request.resource.data.updatedBy == request.auth.uid)
+        || (isActiveUser()
+          && resource.data.assignedTo == request.auth.uid
+          && request.resource.data.updatedBy == request.auth.uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt', 'updatedBy'])
+          && request.resource.data.status in ['To Do', 'In Progress', 'Waiting', 'Completed']);
+
+    }
+
+    match /conversations/{conversationId} {
+      allow create: if isActiveUser()
+        && request.resource.data.participants is list
+        && request.resource.data.participants.size() == 2
+        && request.auth.uid in request.resource.data.participants
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.lastMessage is string
+        && request.resource.data.lastMessage.size() <= 5000
+        && request.resource.data.keys().hasOnly(['participants', 'participantNames', 'lastMessage', 'createdBy', 'createdAt', 'updatedAt']);
+      allow read: if isAdmin()
+        || (isActiveUser()
+          && resource.data.participants is list
+          && request.auth.uid in resource.data.participants);
+      allow update: if isActiveUser()
+        && resource.data.participants is list
+        && request.auth.uid in resource.data.participants
+        && request.resource.data.participants == resource.data.participants
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastMessage', 'updatedAt'])
+        && request.resource.data.lastMessage is string
+        && request.resource.data.lastMessage.size() <= 5000;
+      allow delete: if isAdmin();
+
+      match /messages/{messageId} {
+        allow read: if isActiveUser()
+          && exists(/databases/$(database)/documents/conversations/$(conversationId))
+          && request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participants;
+        allow create: if isActiveUser()
+          && exists(/databases/$(database)/documents/conversations/$(conversationId))
+          && request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participants
+          && request.resource.data.senderId == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() <= 5000
+          && request.resource.data.keys().hasOnly(['senderId', 'text', 'createdAt']);
+        allow update, delete: if false;
+      }
+    }
+
+    match /auditLogs/{logId} {
+      allow read: if isAdmin();
+      allow create: if false;
+      allow update, delete: if false;
+    }
+
+    match /settings/{documentId} {
+      allow read: if isActiveUser();
+      allow create, update: if isAdmin() && request.resource.data.updatedBy == request.auth.uid;
+      allow delete: if false;
+    }
+
+    match /reports/{reportId} {
+      allow read, create, update, delete: if isAdmin();
+    }
+
+    match /exportHistory/{exportId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && request.resource.data.createdBy == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    match /amendments/{amendmentId} {
+      allow read: if isAdmin()
+        || (isActiveUser() && resource.data.createdBy == request.auth.uid);
+      allow create: if isActiveUser()
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.status == 'Pending Review'
+        && request.resource.data.reason is string
+        && request.resource.data.originalRecordId is string
+        && exists(/databases/$(database)/documents/paymentRecords/$(request.resource.data.originalRecordId))
+        && get(/databases/$(database)/documents/paymentRecords/$(request.resource.data.originalRecordId)).data.createdBy == request.auth.uid
+        && get(/databases/$(database)/documents/paymentRecords/$(request.resource.data.originalRecordId)).data.status == 'Approved';
+      allow update: if isAdmin()
+        && resource.data.status == 'Pending Review'
+        && request.resource.data.status in ['Approved', 'Rejected']
+        && request.resource.data.reviewedBy == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['status', 'reviewNote', 'reviewedBy', 'reviewedByName', 'reviewedAt']);
+      allow delete: if false;
+    }
+
+    match /systemHealth/{documentId} {
+      allow read: if isAdmin();
+      allow write: if isAdmin();
+    }
+  }
+}
